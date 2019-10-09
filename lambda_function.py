@@ -1,85 +1,62 @@
-import boto3
-import pytz
+#!/usr/bin/env python
+# encoding: utf-8
+
+import json
+import datetime
 import requests
+import boto3
+import os
+import logging
 
-SLACK_WEBHOOK_URL = os.environ['SLACK_WEBHOOK_URL']
-SLACK_CHANNEL = os.environ['SLACK_CHANNEL']
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
+# Slack の設定
+SLACK_POST_URL = os.environ['slackPostURL']
+SLACK_CHANNEL = os.environ['slackChannel']
 
-def get_cost():
-    """boto3を使って直近の1日の最大の予想請求額を取得する
+response = boto3.client('cloudwatch', region_name='us-east-1')
 
-    :return: response
-    """
+get_metric_statistics = response.get_metric_statistics(
+    Namespace='AWS/Billing',
+    MetricName='EstimatedCharges',
+    Dimensions=[
+        {
+            'Name': 'Currency',
+            'Value': 'USD'
+        }
+    ],
+    StartTime=datetime.datetime.today() - datetime.timedelta(days=1),
+    EndTime=datetime.datetime.today(),
+    Period=86400,
+    Statistics=['Maximum'])
 
-    now = datetime.datetime.now()
+cost = get_metric_statistics['Datapoints'][0]['Maximum']
+date = get_metric_statistics['Datapoints'][0]['Timestamp'].strftime('%Y年%m月%d日')
 
-    cloudwatch = boto3.resource('cloudwatch', region_name='us-east-1')
-    metric = cloudwatch.Metric('AWS/Billing', 'EstimatedCharges')
-    response = metric.get_statistics(
-        Dimensions=[
-            {
-                'Name': 'Currency',
-                'Value': 'USD'
-            },
-        ],
-        StartTime=now - datetime.timedelta(days=1),
-        EndTime=now,
-        Period=86400,
-        Statistics=['Maximum']
-    )
-
-    return response
-
-
-def build_message(response):
-    """SlackにPOSTするメッセージボディを作成する
-
-    :param response:
-    :return: message
-    """
-
-    cost = response['Datapoints'][0]['Maximum']
-    timestamp = (response['Datapoints'][0]['Timestamp'] + datetime.timedelta(days=1)).astimezone(
-        pytz.timezone('Asia/Tokyo')).strftime(
-        '%Y年%m月')
-
-    text = '{}のAWS料金'.format(timestamp)
-    attachment_text = '${}'.format(cost)
-
+def build_message(cost):
     if float(cost) >= 300.0:
-        color = 'danger'   # red
-    elif float(cost) >= 150.0:
-        color = 'warning'  # yellow
+        color = "#ff0000" #red
     else:
-        color = 'good'     # green
+        color = "good"    #green
 
-    atachements = {'text': attachment_text, 'color': color}
+    text = "%sまでのAWSの料金は、$%sです。" % (date, cost)
 
-    message = {
-        'text': text,
-        'channel': SLACK_CHANNEL,
-        'attachments': [atachements],
-    }
-
-    return message
-
-
-def post_message(message):
-    """SlackにPOSTする
-
-    :param message:
-    :return:
-    """
-
-    response = requests.post(SLACK_WEBHOOK_URL, data=json.dumps(message))
-    response.raise_for_status()
-
+    atachements = {"text":text,"color":color}
+    return atachements
 
 def lambda_handler(event, context):
+    content = build_message(cost)
 
-    response = get_cost()
+    # SlackにPOSTする内容をセット
+    slack_message = {
+        'channel': SLACK_CHANNEL,
+        "attachments": [content],
+    }
 
-    message = build_message(response)
-
-    post_message(message)
+    # SlackにPOST
+    try:
+        req = requests.post(SLACK_POST_URL, data=json.dumps(slack_message))
+        logger.info("Message posted to %s", slack_message['channel'])
+    except requests.exceptions.RequestException as e:
+        logger.error("Request failed: %s", e)
